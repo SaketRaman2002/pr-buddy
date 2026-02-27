@@ -1,0 +1,24 @@
+# Environment
+backend/.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# Node
+whatsapp/node_modules/
+whatsapp/auth/
+
+# Storage (large data, not for repo)
+storage/
+
+# Logs
+*.log
+/tmp/
+
+# ChromaDB
+*.sqlite3

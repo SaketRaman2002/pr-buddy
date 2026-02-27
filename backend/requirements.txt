@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+PyGithub
+gitpython
+chromadb
+httpx
+python-dotenv
+pydantic
+pydantic-settings
