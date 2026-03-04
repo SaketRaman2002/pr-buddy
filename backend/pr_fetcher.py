@@ -1,5 +1,6 @@
 import re
 import logging
+import requests
 from dataclasses import dataclass, field
 from github import Github
 from config import settings
@@ -65,6 +66,23 @@ def fetch_pr(pr_url: str) -> PRData:
         pr_url=pr_url,
         changed_files=changed_files
     )
+
+
+def post_pending_review(repo_full_name: str, pr_number: int, review_body: str) -> dict:
+    """
+    Post a pending (draft) review on a GitHub PR.
+    Omitting 'event' leaves it as PENDING — not visible to others until submitted.
+    Returns the review dict from GitHub API (includes 'id' and 'html_url').
+    """
+    url = f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}/reviews"
+    headers = {
+        "Authorization": f"Bearer {settings.GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    resp = requests.post(url, json={"body": review_body}, headers=headers, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
 
 
 def fetch_full_file(repo_full_name: str, file_path: str, ref: str) -> str | None:

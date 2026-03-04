@@ -2,11 +2,19 @@ from context_builder import ReviewContext, FileReviewContext
 
 
 def build_prompt(ctx: ReviewContext) -> str:
+    team_section = ""
+    if ctx.team_review_context:
+        team_section = f"""
+{ctx.team_review_context}
+
+---
+"""
+
     prompt = f"""You are a senior software engineer reviewing a PR for this repository.
 
 Your PRIMARY job: check if new code FITS THE EXISTING CODEBASE STRUCTURE AND PATTERNS.
 You have been given structurally similar files found via semantic vector search — treat them as the ground truth for "how things are done here".
-
+{team_section}
 PR: {ctx.pr_title}
 Author: {ctx.pr_author}
 Branch: {ctx.base_branch}

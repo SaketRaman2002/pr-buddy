@@ -5,11 +5,25 @@ from pr_fetcher import PRData, ChangedFile, fetch_full_file
 from repo_indexer import find_similar_files, get_indexable_files
 from github import Github
 from config import settings
+import team_context
 
 logger = logging.getLogger(__name__)
 gh = Github(settings.GITHUB_TOKEN)
 
 SKIP_EXTENSIONS = {".lock", ".sum", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".ttf"}
+
+
+def _format_similar_reviews(reviews: list[dict]) -> str:
+    if not reviews:
+        return ""
+    lines = ["## HOW SIMILAR PRs WERE REVIEWED IN THIS CODEBASE:\n"]
+    for r in reviews:
+        lines.append(
+            f"### PR: \"{r['pr_title']}\" — reviewed by {r['reviewer']} → {r['verdict']}"
+        )
+        lines.append(r["review_summary"])
+        lines.append("---")
+    return "\n".join(lines)
 
 
 def infer_layer(file_path: str) -> str:
@@ -112,11 +126,28 @@ class ReviewContext:
     base_branch: str
     repo_full_name: str
     repo_structure: str
+    team_review_context: str = ""
     files: list[FileReviewContext] = field(default_factory=list)
 
 
 def build_context(pr_data: PRData) -> ReviewContext:
     repo_structure = get_repo_structure(pr_data.repo_full_name, pr_data.base_branch)
+
+    all_layers = list({infer_layer(f.filename) for f in pr_data.changed_files})
+    try:
+        from review_examples import find_similar_reviews
+        similar = find_similar_reviews(
+            repo_full_name=pr_data.repo_full_name,
+            pr_title=pr_data.title,
+            files_changed=[f.filename for f in pr_data.changed_files],
+            layers=all_layers,
+            pr_description=pr_data.description,
+            top_k=2,
+        )
+        team_ctx = _format_similar_reviews(similar)
+    except Exception as e:
+        logger.warning(f"Semantic review retrieval failed, falling back to recency: {e}")
+        team_ctx = team_context.get_team_review_context(pr_data.repo_full_name)
 
     ctx = ReviewContext(
         pr_title=pr_data.title,
@@ -125,7 +156,8 @@ def build_context(pr_data: PRData) -> ReviewContext:
         pr_url=pr_data.pr_url,
         base_branch=pr_data.base_branch,
         repo_full_name=pr_data.repo_full_name,
-        repo_structure=repo_structure
+        repo_structure=repo_structure,
+        team_review_context=team_ctx,
     )
 
     for changed_file in pr_data.changed_files:
