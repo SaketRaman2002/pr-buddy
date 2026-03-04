@@ -51,12 +51,38 @@ def fetch_and_save_team_reviews(repo_full_name: str, max_prs: int = 30) -> int:
                 continue
 
             try:
+                files = [f.filename for f in pr.get_files()]
+
                 for review in pr.get_reviews():
                     if review.user.login not in team:
                         continue
-                    if not review.body:
+
+                    # Collect inline comments for this review
+                    inline_comments = []
+                    try:
+                        for comment in pr.get_review_comments():
+                            if comment.user.login == review.user.login:
+                                inline_comments.append({
+                                    "path": comment.path,
+                                    "body": comment.body[:500],
+                                    "line": comment.position,
+                                })
+                    except Exception:
+                        pass
+
+                    # Skip if no body AND no inline comments
+                    if not review.body and not inline_comments:
                         continue
-                    files = [f.filename for f in pr.get_files()]
+
+                    # Build combined review text
+                    body_parts = []
+                    if review.body:
+                        body_parts.append(review.body[:1500])
+                    if inline_comments:
+                        body_parts.append("\nInline comments:")
+                        for ic in inline_comments[:15]:
+                            body_parts.append(f"  - **{ic['path']}**: {ic['body']}")
+
                     reviews_data.append({
                         "repo": repo_full_name,
                         "pr_number": pr.number,
@@ -64,7 +90,7 @@ def fetch_and_save_team_reviews(repo_full_name: str, max_prs: int = 30) -> int:
                         "pr_author": pr.user.login,
                         "reviewer": review.user.login,
                         "state": review.state,
-                        "body": review.body[:2000],
+                        "body": "\n".join(body_parts)[:3000],
                         "files": files[:10],
                         "submitted_at": review.submitted_at.isoformat() if review.submitted_at else "",
                     })

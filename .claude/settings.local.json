@@ -4,7 +4,8 @@
       "Bash(grep:*)",
       "Bash(export NVM_DIR=\"$HOME/.nvm\" && . \"$NVM_DIR/nvm.sh\" && nvm install 20 2>&1)",
       "Bash(export:*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(curl:*)"
     ]
   }
 }

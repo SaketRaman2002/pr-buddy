@@ -1,5 +1,7 @@
 import asyncio
+import json
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
@@ -88,6 +90,64 @@ class FeedbackCollectRequest(BaseModel):
     min_age_hours: int = 2
 
 
+def _parse_review_json(raw: str) -> dict:
+    """Parse LLM output as JSON. Handles markdown code fences, extra text, and nested braces."""
+    text = raw.strip()
+
+    # Strip markdown code fences if present (greedy — take the largest match)
+    fence_match = re.search(r"```(?:json)?\s*\n(.*)\n\s*```", text, re.DOTALL)
+    if fence_match:
+        text = fence_match.group(1).strip()
+
+    # Try direct parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Try to extract JSON by matching braces properly, accounting for strings
+    brace_start = text.find("{")
+    if brace_start != -1:
+        # Walk through chars, track depth, respect strings
+        depth = 0
+        in_string = False
+        escape_next = False
+        last_valid_end = -1
+        for i in range(brace_start, len(text)):
+            c = text[i]
+            if escape_next:
+                escape_next = False
+                continue
+            if c == "\\":
+                escape_next = True
+                continue
+            if c == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    last_valid_end = i
+                    break
+
+        if last_valid_end > brace_start:
+            candidate = text[brace_start:last_valid_end + 1]
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError as e:
+                logger.warning(f"Found JSON-like block but failed to parse: {e}")
+                logger.debug(f"Candidate JSON (first 300): {candidate[:300]}")
+
+    # Fallback: return the raw text as summary with no inline comments
+    logger.warning("Could not parse LLM output as JSON, falling back to plain text")
+    logger.warning(f"Raw output (first 500): {text[:500]}")
+    return {"summary": raw, "comments": [], "verdict": "", "confidence": ""}
+
+
 @app.post("/review")
 async def review_pr(req: ReviewRequest):
     if "github.com" not in req.pr_url or "/pull/" not in req.pr_url:
@@ -116,18 +176,69 @@ async def review_pr(req: ReviewRequest):
     except Exception as e:
         raise HTTPException(500, f"LLM call failed: {e}")
 
-    # Post as a pending (draft) review on the PR — not submitted, only visible to you
+    # Parse the LLM JSON response into summary + inline comments
+    logger.debug(f"Raw LLM output (first 500 chars): {review_text[:500]}")
+    logger.info(f"Raw LLM output length: {len(review_text)} chars")
+    review_data = _parse_review_json(review_text)
+    summary_body = review_data["summary"]
+    inline_comments = review_data.get("comments", [])
+    verdict = review_data.get("verdict", "")
+    confidence = review_data.get("confidence", "")
+
+    if verdict or confidence:
+        summary_body += f"\n\n**Verdict:** {verdict}  |  **Confidence:** {confidence}"
+
+    # Validate comment positions against actual diff data
+    # Build a map of file -> max diff lines for validation
+    diff_line_counts = {}
+    for cf in pr_data.changed_files:
+        if cf.patch:
+            diff_line_counts[cf.filename] = len(cf.patch.split("\n"))
+
+    valid_comments = []
+    for c in inline_comments:
+        path = c.get("path", "")
+        pos = c.get("position")
+        body = c.get("body", "")
+        if not path or not body or not isinstance(pos, int) or pos < 1:
+            logger.warning(f"Skipping invalid comment: path={path} pos={pos}")
+            continue
+        max_lines = diff_line_counts.get(path, 0)
+        if max_lines == 0:
+            logger.warning(f"Skipping comment for unknown file: {path}")
+            continue
+        if pos > max_lines:
+            logger.warning(f"Skipping comment with out-of-range position: {path} pos={pos} max={max_lines}")
+            continue
+        valid_comments.append(c)
+
+    inline_comments = valid_comments
+    logger.info(f"Validated {len(inline_comments)} inline comments from LLM response")
+
+    # Post as a pending (draft) review on the PR with inline comments
     try:
         gh_review = await asyncio.to_thread(
             pr_fetcher.post_pending_review,
             pr_data.repo_full_name,
             pr_data.pr_number,
-            review_text
+            summary_body,
+            inline_comments,
         )
         review_id = gh_review.get("id")
     except Exception as e:
         logger.error(f"Failed to post pending review on GitHub: {e}")
-        raise HTTPException(500, f"Review generated but failed to post to GitHub: {e}")
+        # Fallback: post as a plain body review without inline comments
+        logger.info("Falling back to plain body review")
+        try:
+            gh_review = await asyncio.to_thread(
+                pr_fetcher.post_pending_review,
+                pr_data.repo_full_name,
+                pr_data.pr_number,
+                f"{summary_body}\n\n---\n\n_Inline comments failed to post. Raw LLM output below:_\n\n{review_text}",
+            )
+            review_id = gh_review.get("id")
+        except Exception as e2:
+            raise HTTPException(500, f"Review generated but failed to post to GitHub: {e2}")
 
     # Save draft metadata so feedback_collector can detect submission later (learning loop)
     try:
@@ -152,6 +263,7 @@ async def review_pr(req: ReviewRequest):
         "draft_review_id": review_id,
         "files_reviewed": [f.changed_file for f in ctx.files],
         "similar_files_found": similar_count,
+        "inline_comments_posted": len(inline_comments),
         "processing_time_seconds": elapsed,
         "examples_used": bool(ctx.team_review_context),
     }

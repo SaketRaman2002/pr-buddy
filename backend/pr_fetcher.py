@@ -68,9 +68,32 @@ def fetch_pr(pr_url: str) -> PRData:
     )
 
 
-def post_pending_review(repo_full_name: str, pr_number: int, review_body: str) -> dict:
+def _delete_existing_pending_reviews(repo_full_name: str, pr_number: int):
+    """Delete any existing pending reviews by the authenticated user so we can post a new one."""
+    url = f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}/reviews"
+    headers = {
+        "Authorization": f"Bearer {settings.GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        for review in resp.json():
+            if review.get("state") == "PENDING":
+                del_url = f"{url}/{review['id']}"
+                requests.delete(del_url, headers=headers, timeout=15)
+                logger.info(f"Deleted existing pending review {review['id']} on PR #{pr_number}")
+    except Exception as e:
+        logger.warning(f"Failed to clean up pending reviews: {e}")
+
+
+def post_pending_review(repo_full_name: str, pr_number: int, review_body: str,
+                        comments: list[dict] | None = None) -> dict:
     """
-    Post a pending (draft) review on a GitHub PR.
+    Post a pending (draft) review on a GitHub PR with optional inline comments.
+    Each comment dict should have: path, position, body.
+    'position' is the line offset within the diff hunk (1-indexed from the first line of the diff).
     Omitting 'event' leaves it as PENDING — not visible to others until submitted.
     Returns the review dict from GitHub API (includes 'id' and 'html_url').
     """
@@ -80,7 +103,26 @@ def post_pending_review(repo_full_name: str, pr_number: int, review_body: str) -
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    resp = requests.post(url, json={"body": review_body}, headers=headers, timeout=30)
+    # Clean up any existing pending reviews first
+    _delete_existing_pending_reviews(repo_full_name, pr_number)
+
+    payload = {"body": review_body}
+    if comments:
+        # GitHub API expects: path, position (or line), body
+        # position is 1-indexed line within the diff hunk
+        valid_comments = [
+            {"path": c["path"], "position": c["position"], "body": c["body"]}
+            for c in comments
+            if isinstance(c.get("position"), int) and c["position"] > 0
+            and c.get("path") and c.get("body")
+        ]
+        if valid_comments:
+            payload["comments"] = valid_comments
+            logger.info(f"Posting review with {len(valid_comments)} inline comments")
+
+    resp = requests.post(url, json=payload, headers=headers, timeout=30)
+    if resp.status_code >= 400:
+        logger.error(f"GitHub review API error: {resp.status_code} {resp.text}")
     resp.raise_for_status()
     return resp.json()
 
